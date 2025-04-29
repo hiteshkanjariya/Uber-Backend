@@ -73,7 +73,6 @@ async function getAllFare(req, res) {
         // return fares;
         res.status(200).json({ message: "Fare retrived successfully", data: fares })
     } catch (error) {
-        console.log("🚀 ~ getAllFare ~ error:", error)
         res.status(500).json({ message: "Internal server error" })
     }
 }
@@ -114,7 +113,6 @@ const createRide = async (req, res) => {
                 }
             }
         });
-        ride.otp = "";
         Promise.all(captions?.map(async caption => {
             sendMessageToSocketId(caption.socketId, {
                 event: "new-ride",
@@ -148,11 +146,10 @@ const confirmRide = async (req, res, next) => {
             { new: true }
         );
 
-        const ride = await Ride.findOne({ _id: rideId }).populate("userId").populate("caption").select("opt")
+        const ride = await Ride.findOne({ _id: rideId }).populate("userId").populate("caption").select("otp")
         if (!ride) {
             res.status(400).json({ message: "Ride not found" })
         }
-        console.log("🚀 ~ confirmRide ~ ride:", ride)
 
         sendMessageToSocketId(ride.userId.socketId, {
             event: "ride-confirm",
@@ -165,4 +162,69 @@ const confirmRide = async (req, res, next) => {
     }
 }
 
-module.exports = { createRide, getFare, getAllFare, confirmRide };
+const verifyOTPandStartRide = async (req, res) => {
+    try {
+        const { rideId, otp } = req.body;
+        const ride = await Ride.findOne({ _id: rideId }).select("otp").populate("userId", "socketId");
+        if (!ride) {
+            return res.status(404).json({ message: "Ride not found" });
+        }
+        if (ride.otp !== otp) {
+            return res.status(400).json({ message: "Invalid OTP" })
+        }
+        const updateRide = await Ride.findByIdAndUpdate(rideId, {
+            status: "ongoing"
+        }, { new: true })
+        const rideData = await Ride.findOne({ _id: rideId }).select("-otp").populate("userId", "-password").populate("caption", "-password");
+        if (ride.userId.socketId) {
+            sendMessageToSocketId(ride.userId.socketId, {
+                event: "ride-started",
+                data: rideData,
+            })
+        }
+
+        res.status(200).json({ message: "Ride successfully started" })
+    } catch (error) {
+        console.log("🚀 ~ verifyOTPandStartRide ~ error:", error)
+        res.status(500).json({ message: "Internal server error" })
+    }
+}
+
+const endRide = async (req, res) => {
+    try {
+        const { rideId } = req.body;
+        const caption = req.caption;
+        if (!caption || !caption._id) {
+            return res.status(401).json({ message: "Unauthorized: Invalid caption" });
+        }
+
+        const ride = await Ride.findOne({
+            _id: rideId,
+            caption: caption._id
+        }).populate("userId", "socketId")
+
+        if (!ride) {
+            return res.status(400).json({ message: "Ride not found" })
+        }
+
+        if (ride.status !== 'ongoing') {
+            return res.status(400).json({ message: "Ride not ongoing" })
+        }
+
+        await Ride.findByIdAndUpdate(rideId, {
+            status: "completed"
+        });
+
+        if (ride.userId.socketId) {
+            sendMessageToSocketId(ride.userId.socketId, {
+                event: "ride-end",
+                data: ride,
+            })
+        }
+        return res.status(200).json({ message: "Ride ended successfully" });
+    } catch (error) {
+        console.log("🚀 ~ endRide ~ error:", error)
+        res.status(500).json({ message: "Internal server error", error: error.message });
+    }
+}
+module.exports = { createRide, getFare, getAllFare, confirmRide, verifyOTPandStartRide, endRide };
